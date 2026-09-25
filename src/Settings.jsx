@@ -17,6 +17,17 @@ import {
 
 import "./Settings.css";
 
+const Toggle = ({ checked, onChange }) => (
+  <button
+    type="button"
+    className={`settings-toggle ${checked ? "active" : ""}`}
+    onClick={() => onChange(!checked)}
+    aria-label={checked ? "Disable setting" : "Enable setting"}
+  >
+    <span></span>
+  </button>
+);
+
 function Settings() {
   const [activeSection, setActiveSection] = useState("general");
 
@@ -70,17 +81,6 @@ function Settings() {
 
     setSaved(false);
   };
-
-  const Toggle = ({ checked, onChange }) => (
-    <button
-      type="button"
-      className={`settings-toggle ${checked ? "active" : ""}`}
-      onClick={() => onChange(!checked)}
-      aria-label={checked ? "Disable setting" : "Enable setting"}
-    >
-      <span></span>
-    </button>
-  );
 
   return (
     <main className="settings-page">
