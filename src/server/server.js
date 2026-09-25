@@ -17,37 +17,66 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 1. Check for Groq API Key (Primary)
-const groqKey = process.env.GROQ_API_KEY;
-const hasValidGroqKey =
-  groqKey &&
-  groqKey.trim() &&
-  !groqKey.includes("YOUR_") &&
-  groqKey !== "YOUR_API_KEY_HERE";
+// Target Model
+const targetModel = process.env.AI_MODEL || "qwen/qwen3.8-27b";
+
+// 1. Check for OpenRouter API Key (Primary for qwen/qwen3.8-27b)
+const rawOpenRouterKey = process.env.OPENROUTER_API_KEY;
+const rawGroqKey = process.env.GROQ_API_KEY;
+const rawOpenAiKey = process.env.OPENAI_API_KEY;
+
+// Auto-detect OpenRouter key even if put into other env vars (starts with sk-or-)
+const openRouterKey =
+  (rawOpenRouterKey && !rawOpenRouterKey.includes("YOUR_") && rawOpenRouterKey.trim()) ||
+  (rawGroqKey && rawGroqKey.startsWith("sk-or-") && rawGroqKey.trim()) ||
+  (rawOpenAiKey && rawOpenAiKey.startsWith("sk-or-") && rawOpenAiKey.trim());
+
+let openrouter = null;
+if (openRouterKey) {
+  try {
+    const { default: OpenAI } = await import("openai");
+    openrouter = new OpenAI({
+      apiKey: openRouterKey,
+      baseURL: "https://openrouter.ai/api/v1",
+      defaultHeaders: {
+        "HTTP-Referer": "http://localhost:5173",
+        "X-Title": "HelpIQ",
+      },
+    });
+  } catch (err) {
+    console.warn("OpenRouter initialization failed:", err.message);
+  }
+}
+
+// 2. Check for Groq API Key
+const groqKey =
+  rawGroqKey &&
+  !rawGroqKey.includes("YOUR_") &&
+  !rawGroqKey.startsWith("sk-or-") &&
+  rawGroqKey.trim();
 
 let groq = null;
-if (hasValidGroqKey) {
+if (groqKey) {
   try {
     const { default: Groq } = await import("groq-sdk");
-    groq = new Groq({ apiKey: groqKey.trim() });
+    groq = new Groq({ apiKey: groqKey });
   } catch (err) {
     console.warn("Groq SDK initialization failed:", err.message);
   }
 }
 
-// 2. Check for OpenAI API Key (Secondary fallback)
-const openAiKey = process.env.OPENAI_API_KEY;
-const hasValidOpenAIKey =
-  openAiKey &&
-  openAiKey.trim() &&
-  !openAiKey.includes("YOUR_") &&
-  openAiKey !== "YOUR_API_KEY_HERE";
+// 3. Check for OpenAI API Key
+const openAiKey =
+  rawOpenAiKey &&
+  !rawOpenAiKey.includes("YOUR_") &&
+  !rawOpenAiKey.startsWith("sk-or-") &&
+  rawOpenAiKey.trim();
 
 let openai = null;
-if (!groq && hasValidOpenAIKey) {
+if (openAiKey) {
   try {
     const { default: OpenAI } = await import("openai");
-    openai = new OpenAI({ apiKey: openAiKey.trim() });
+    openai = new OpenAI({ apiKey: openAiKey });
   } catch (err) {
     console.warn("OpenAI package initialization failed:", err.message);
   }
@@ -155,7 +184,12 @@ To resolve VPN connection errors:
 3. Restart the **Print Spooler** service via \`services.msc\` or restart your PC.`;
   }
 
-  if (query.includes("email") || query.includes("outlook") || query.includes("mail") || query.includes("teams")) {
+  if (
+    query.includes("email") ||
+    query.includes("outlook") ||
+    query.includes("mail") ||
+    query.includes("teams")
+  ) {
     return `### 📧 Email & Microsoft Teams Troubleshooting
 
 1. **Verify Credentials**: Sign in to the web version (*outlook.office.com*) to check if your account is active.
@@ -166,7 +200,13 @@ To resolve VPN connection errors:
 4. **Re-sync Account**: In Windows Settings > *Accounts* > *Access work or school*, disconnect and reconnect your corporate account.`;
   }
 
-  if (query.includes("audio") || query.includes("mic") || query.includes("speaker") || query.includes("sound") || query.includes("camera")) {
+  if (
+    query.includes("audio") ||
+    query.includes("mic") ||
+    query.includes("speaker") ||
+    query.includes("sound") ||
+    query.includes("camera")
+  ) {
     return `### 🎧 Audio & Camera Diagnostics
 
 1. **Device Permissions**: Go to Windows Settings > *Privacy & Security* > *Microphone / Camera* and ensure app access is allowed.
@@ -174,7 +214,12 @@ To resolve VPN connection errors:
 3. **Driver Check**: Open Device Manager (\`devmgmt.msc\`), expand *Audio inputs and outputs*, right-click your device, and select **Update driver**.`;
   }
 
-  if (query.includes("software") || query.includes("install") || query.includes("admin") || query.includes("permission")) {
+  if (
+    query.includes("software") ||
+    query.includes("install") ||
+    query.includes("admin") ||
+    query.includes("permission")
+  ) {
     return `### 📦 Software & Installation Assistance
 
 1. **Company Portal**: Check if the requested application is available in the **Company Portal** or self-service IT catalog.
@@ -183,8 +228,12 @@ To resolve VPN connection errors:
   }
 
   // Only trigger greeting if message is primarily a greeting, not a full question
-  if (/^(hi|hello|hey|help|greetings|good morning|good afternoon|good evening)(\s+there|\s+copilot|\s+helpiq)?$/i.test(query)) {
-    return `Hello! 👋 I'm **HelpIQ Copilot**, powered by **Groq AI**.
+  if (
+    /^(hi|hello|hey|help|greetings|good morning|good afternoon|good evening)(\s+there|\s+copilot|\s+helpiq)?$/i.test(
+      query
+    )
+  ) {
+    return `Hello! 👋 I'm **HelpIQ Copilot**, powered by **${targetModel}**.
 
 How can I help you today? You can ask me to:
 - 🔑 **Reset passwords** or unlock accounts
@@ -207,15 +256,18 @@ I have received your request regarding: **"${userMessage}"**.
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  const currentProvider = groq
-    ? "groq (llama-3.3-70b-versatile)"
+  const currentProvider = openrouter
+    ? `OpenRouter (${targetModel})`
+    : groq
+    ? "Groq (llama-3.3-70b-versatile)"
     : openai
-    ? "openai (gpt-4o-mini)"
+    ? "OpenAI (gpt-4o-mini)"
     : "intelligent-knowledge-base";
 
   res.json({
     status: "ok",
     aiProvider: currentProvider,
+    model: targetModel,
   });
 });
 
@@ -231,17 +283,17 @@ app.post("/api/chat", async (req, res) => {
     }
 
     const cleanMessage = message.trim();
+    const systemPrompt = `You are HelpIQ Copilot, an expert IT support assistant powered by ${targetModel}. Provide concise, clear, and actionable step-by-step troubleshooting steps for corporate and personal IT issues. Use markdown formatting when helpful.`;
 
-    // 1. Try Groq (Ultra-fast Llama-3.3-70b)
-    if (groq) {
+    // 1. Try OpenRouter (Model: qwen/qwen3.8-27b or custom)
+    if (openrouter) {
       try {
-        const completion = await groq.chat.completions.create({
-          model: "llama-3.3-70b-versatile",
+        const completion = await openrouter.chat.completions.create({
+          model: targetModel,
           messages: [
             {
               role: "system",
-              content:
-                "You are HelpIQ Copilot, an expert IT support assistant powered by Groq. Provide concise, clear, and actionable step-by-step troubleshooting steps for corporate and personal IT issues. Use markdown formatting when helpful.",
+              content: systemPrompt,
             },
             {
               role: "user",
@@ -256,7 +308,66 @@ app.post("/api/chat", async (req, res) => {
         if (reply) {
           return res.json({
             answer: reply,
-            provider: "groq (llama-3.3-70b-versatile)",
+            provider: `OpenRouter (${targetModel})`,
+          });
+        }
+      } catch (openRouterError) {
+        console.warn("OpenRouter API call failed, attempting fallback:", openRouterError.message);
+        // If exact model failed, try free tier alias or next provider
+        if (targetModel.includes("qwen") && !targetModel.includes(":free")) {
+          try {
+            const freeCompletion = await openrouter.chat.completions.create({
+              model: `${targetModel}:free`,
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: cleanMessage },
+              ],
+              temperature: 0.6,
+              max_tokens: 800,
+            });
+            const freeReply = freeCompletion.choices[0]?.message?.content;
+            if (freeReply) {
+              return res.json({
+                answer: freeReply,
+                provider: `OpenRouter (${targetModel}:free)`,
+              });
+            }
+          } catch {
+            // Ignore and proceed to secondary
+          }
+        }
+      }
+    }
+
+    // 2. Try Groq (if configured and OpenRouter not used)
+    if (groq) {
+      try {
+        // Groq uses qwen-2.5-32b or llama-3.3-70b-versatile
+        const groqModel = targetModel.toLowerCase().includes("qwen")
+          ? "qwen-2.5-32b"
+          : "llama-3.3-70b-versatile";
+
+        const completion = await groq.chat.completions.create({
+          model: groqModel,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: cleanMessage,
+            },
+          ],
+          temperature: 0.6,
+          max_tokens: 800,
+        });
+
+        const reply = completion.choices[0]?.message?.content;
+        if (reply) {
+          return res.json({
+            answer: reply,
+            provider: `Groq (${groqModel})`,
           });
         }
       } catch (groqError) {
@@ -264,7 +375,7 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    // 2. Secondary fallback: OpenAI (if configured)
+    // 3. Try OpenAI (if configured)
     if (openai) {
       try {
         const completion = await openai.chat.completions.create({
@@ -272,8 +383,7 @@ app.post("/api/chat", async (req, res) => {
           messages: [
             {
               role: "system",
-              content:
-                "You are HelpIQ Copilot, an expert IT support assistant. Provide concise, clear, and actionable step-by-step troubleshooting steps for corporate and personal IT issues. Use markdown formatting when helpful.",
+              content: systemPrompt,
             },
             {
               role: "user",
@@ -288,7 +398,7 @@ app.post("/api/chat", async (req, res) => {
         if (reply) {
           return res.json({
             answer: reply,
-            provider: "openai (gpt-4o-mini)",
+            provider: "OpenAI (gpt-4o-mini)",
           });
         }
       } catch (openAiError) {
@@ -296,7 +406,7 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    // 3. Built-in IT Knowledge Base fallback
+    // 4. Built-in IT Knowledge Base fallback
     const localAnswer = generateITSupportResponse(cleanMessage);
     return res.json({
       answer: localAnswer,
@@ -313,12 +423,15 @@ app.post("/api/chat", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  const providerLabel = groq
-    ? "Groq (llama-3.3-70b-versatile)"
+  const providerLabel = openrouter
+    ? `OpenRouter (${targetModel})`
+    : groq
+    ? "Groq (Qwen/Llama)"
     : openai
     ? "OpenAI (gpt-4o-mini)"
-    : "Intelligent IT Knowledge Base";
+    : "Intelligent IT Knowledge Base (add API key to activate live LLM)";
 
   console.log(`HelpIQ AI server running on http://localhost:${PORT}`);
+  console.log(`Configured Model: ${targetModel}`);
   console.log(`AI Provider mode: ${providerLabel}`);
 });
