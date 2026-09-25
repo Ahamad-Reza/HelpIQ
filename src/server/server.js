@@ -155,20 +155,44 @@ To resolve VPN connection errors:
 3. Restart the **Print Spooler** service via \`services.msc\` or restart your PC.`;
   }
 
-  if (
-    query.includes("hello") ||
-    query.includes("hi") ||
-    query.includes("hey") ||
-    query.includes("help")
-  ) {
+  if (query.includes("email") || query.includes("outlook") || query.includes("mail") || query.includes("teams")) {
+    return `### 📧 Email & Microsoft Teams Troubleshooting
+
+1. **Verify Credentials**: Sign in to the web version (*outlook.office.com*) to check if your account is active.
+2. **Clear Outlook Cache**:
+   - Close Outlook.
+   - Press \`Win + R\`, type \`%localappdata%\\Microsoft\\Outlook\`, and clear temp cache files.
+3. **Teams Cache Reset**: Quit Teams from the system tray, then delete contents in \`%appdata%\\Microsoft\\Teams\`.
+4. **Re-sync Account**: In Windows Settings > *Accounts* > *Access work or school*, disconnect and reconnect your corporate account.`;
+  }
+
+  if (query.includes("audio") || query.includes("mic") || query.includes("speaker") || query.includes("sound") || query.includes("camera")) {
+    return `### 🎧 Audio & Camera Diagnostics
+
+1. **Device Permissions**: Go to Windows Settings > *Privacy & Security* > *Microphone / Camera* and ensure app access is allowed.
+2. **Default Output**: Right-click the speaker icon in taskbar > *Sound settings* and confirm the correct output device is set as Default.
+3. **Driver Check**: Open Device Manager (\`devmgmt.msc\`), expand *Audio inputs and outputs*, right-click your device, and select **Update driver**.`;
+  }
+
+  if (query.includes("software") || query.includes("install") || query.includes("admin") || query.includes("permission")) {
+    return `### 📦 Software & Installation Assistance
+
+1. **Company Portal**: Check if the requested application is available in the **Company Portal** or self-service IT catalog.
+2. **Admin Privileges**: If you see an *"Administrator credentials required"* prompt, submit a ticket requesting software deployment or elevated access.
+3. **Compatibility**: Verify minimum system requirements and ensure your OS has the latest patches applied.`;
+  }
+
+  // Only trigger greeting if message is primarily a greeting, not a full question
+  if (/^(hi|hello|hey|help|greetings|good morning|good afternoon|good evening)(\s+there|\s+copilot|\s+helpiq)?$/i.test(query)) {
     return `Hello! 👋 I'm **HelpIQ Copilot**, powered by **Groq AI**.
 
 How can I help you today? You can ask me to:
 - 🔑 **Reset passwords** or unlock accounts
 - 🌐 Troubleshoot **Wi-Fi & network** connection drops
 - ⚙️ **Diagnose slow performance** or system crashes
-- 🎫 Guide you through **creating a support ticket**
-- 🛡️ Resolve **VPN, Printer, or Software** issues`;
+- 📧 Fix **Outlook, Email, or Teams** issues
+- 🎧 Troubleshoot **Audio, Mic, or Camera**
+- 🎫 Guide you through **creating a support ticket**`;
   }
 
   return `### 💡 HelpIQ IT Assistant Analysis
