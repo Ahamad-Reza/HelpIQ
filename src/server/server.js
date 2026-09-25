@@ -17,25 +17,52 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Check if a real OpenAI API key is configured
-const apiKey = process.env.OPENAI_API_KEY;
-const hasValidOpenAIKey = apiKey && apiKey.trim() && apiKey !== "YOUR_API_KEY_HERE";
+// 1. Check for Groq API Key (Primary)
+const groqKey = process.env.GROQ_API_KEY;
+const hasValidGroqKey =
+  groqKey &&
+  groqKey.trim() &&
+  !groqKey.includes("YOUR_") &&
+  groqKey !== "YOUR_API_KEY_HERE";
 
-let openai = null;
-if (hasValidOpenAIKey) {
+let groq = null;
+if (hasValidGroqKey) {
   try {
-    const { default: OpenAI } = await import("openai");
-    openai = new OpenAI({ apiKey });
+    const { default: Groq } = await import("groq-sdk");
+    groq = new Groq({ apiKey: groqKey.trim() });
   } catch (err) {
-    console.warn("OpenAI package initialization failed, falling back to local IT knowledge base:", err.message);
+    console.warn("Groq SDK initialization failed:", err.message);
   }
 }
 
-// Intelligent IT Knowledge Base Responses for fallback / offline / non-API mode
+// 2. Check for OpenAI API Key (Secondary fallback)
+const openAiKey = process.env.OPENAI_API_KEY;
+const hasValidOpenAIKey =
+  openAiKey &&
+  openAiKey.trim() &&
+  !openAiKey.includes("YOUR_") &&
+  openAiKey !== "YOUR_API_KEY_HERE";
+
+let openai = null;
+if (!groq && hasValidOpenAIKey) {
+  try {
+    const { default: OpenAI } = await import("openai");
+    openai = new OpenAI({ apiKey: openAiKey.trim() });
+  } catch (err) {
+    console.warn("OpenAI package initialization failed:", err.message);
+  }
+}
+
+// Intelligent IT Knowledge Base Responses for fallback / offline mode
 function generateITSupportResponse(userMessage) {
   const query = userMessage.toLowerCase().trim();
 
-  if (query.includes("password") || query.includes("reset") || query.includes("login") || query.includes("account locked")) {
+  if (
+    query.includes("password") ||
+    query.includes("reset") ||
+    query.includes("login") ||
+    query.includes("account locked")
+  ) {
     return `### 🔑 Password & Account Reset Guide
 
 Here is how you can resolve password and login issues:
@@ -49,7 +76,14 @@ Here is how you can resolve password and login issues:
 4. **Account Locked?**: If you made more than 5 failed attempts, the account enters a 15-minute cooldown. If you need it unlocked immediately, click **"Create a ticket"** or contact the IT Helpdesk.`;
   }
 
-  if (query.includes("wifi") || query.includes("wi-fi") || query.includes("network") || query.includes("internet") || query.includes("dns") || query.includes("offline")) {
+  if (
+    query.includes("wifi") ||
+    query.includes("wi-fi") ||
+    query.includes("network") ||
+    query.includes("internet") ||
+    query.includes("dns") ||
+    query.includes("offline")
+  ) {
     return `### 🌐 Network & Wi-Fi Troubleshooting
 
 Try these step-by-step diagnostic actions:
@@ -63,7 +97,12 @@ Try these step-by-step diagnostic actions:
 4. **Hardware Check**: Verify the router/access point lights. If on a company VPN, temporarily disconnect the VPN to check if local internet works.`;
   }
 
-  if (query.includes("ticket") || query.includes("create ticket") || query.includes("raise ticket") || query.includes("support ticket")) {
+  if (
+    query.includes("ticket") ||
+    query.includes("create ticket") ||
+    query.includes("raise ticket") ||
+    query.includes("support ticket")
+  ) {
     return `### 🎫 IT Support Ticket Creation
 
 I can help route this to the IT Support queue:
@@ -78,7 +117,15 @@ I can help route this to the IT Support queue:
 3. Once submitted, our team usually responds within **15–30 minutes**.`;
   }
 
-  if (query.includes("diagnose") || query.includes("slow") || query.includes("freeze") || query.includes("crash") || query.includes("performance") || query.includes("cpu") || query.includes("ram")) {
+  if (
+    query.includes("diagnose") ||
+    query.includes("slow") ||
+    query.includes("freeze") ||
+    query.includes("crash") ||
+    query.includes("performance") ||
+    query.includes("cpu") ||
+    query.includes("ram")
+  ) {
     return `### ⚙️ System Performance Diagnostics
 
 Let's identify what's slowing down your system:
@@ -108,8 +155,13 @@ To resolve VPN connection errors:
 3. Restart the **Print Spooler** service via \`services.msc\` or restart your PC.`;
   }
 
-  if (query.includes("hello") || query.includes("hi") || query.includes("hey") || query.includes("help")) {
-    return `Hello! 👋 I'm **HelpIQ Copilot**, your intelligent IT support assistant. 
+  if (
+    query.includes("hello") ||
+    query.includes("hi") ||
+    query.includes("hey") ||
+    query.includes("help")
+  ) {
+    return `Hello! 👋 I'm **HelpIQ Copilot**, powered by **Groq AI**.
 
 How can I help you today? You can ask me to:
 - 🔑 **Reset passwords** or unlock accounts
@@ -131,9 +183,15 @@ I have received your request regarding: **"${userMessage}"**.
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
+  const currentProvider = groq
+    ? "groq (llama-3.3-70b-versatile)"
+    : openai
+    ? "openai (gpt-4o-mini)"
+    : "intelligent-knowledge-base";
+
   res.json({
     status: "ok",
-    aiProvider: hasValidOpenAIKey && openai ? "openai" : "intelligent-knowledge-base",
+    aiProvider: currentProvider,
   });
 });
 
@@ -150,7 +208,39 @@ app.post("/api/chat", async (req, res) => {
 
     const cleanMessage = message.trim();
 
-    // If OpenAI is configured and initialized, query OpenAI
+    // 1. Try Groq (Ultra-fast Llama-3.3-70b)
+    if (groq) {
+      try {
+        const completion = await groq.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are HelpIQ Copilot, an expert IT support assistant powered by Groq. Provide concise, clear, and actionable step-by-step troubleshooting steps for corporate and personal IT issues. Use markdown formatting when helpful.",
+            },
+            {
+              role: "user",
+              content: cleanMessage,
+            },
+          ],
+          temperature: 0.6,
+          max_tokens: 800,
+        });
+
+        const reply = completion.choices[0]?.message?.content;
+        if (reply) {
+          return res.json({
+            answer: reply,
+            provider: "groq (llama-3.3-70b-versatile)",
+          });
+        }
+      } catch (groqError) {
+        console.warn("Groq API call failed, attempting fallback:", groqError.message);
+      }
+    }
+
+    // 2. Secondary fallback: OpenAI (if configured)
     if (openai) {
       try {
         const completion = await openai.chat.completions.create({
@@ -174,7 +264,7 @@ app.post("/api/chat", async (req, res) => {
         if (reply) {
           return res.json({
             answer: reply,
-            provider: "openai",
+            provider: "openai (gpt-4o-mini)",
           });
         }
       } catch (openAiError) {
@@ -182,7 +272,7 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    // Fallback to intelligent local knowledge base
+    // 3. Built-in IT Knowledge Base fallback
     const localAnswer = generateITSupportResponse(cleanMessage);
     return res.json({
       answer: localAnswer,
@@ -199,6 +289,12 @@ app.post("/api/chat", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
+  const providerLabel = groq
+    ? "Groq (llama-3.3-70b-versatile)"
+    : openai
+    ? "OpenAI (gpt-4o-mini)"
+    : "Intelligent IT Knowledge Base";
+
   console.log(`HelpIQ AI server running on http://localhost:${PORT}`);
-  console.log(`AI Provider mode: ${hasValidOpenAIKey && openai ? "OpenAI API" : "Intelligent IT Knowledge Base"}`);
+  console.log(`AI Provider mode: ${providerLabel}`);
 });
