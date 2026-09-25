@@ -290,13 +290,14 @@ function AICopilot() {
   }, []);
 
   // Connect to backend or fallback gracefully
-  const getAIResponse = async (userMessage) => {
+  const getAIResponse = async (userMessage, conversationHistory) => {
     const endpoints = ["/api/chat", "http://localhost:5000/api/chat"];
 
     for (const url of endpoints) {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        // 30s timeout to allow Groq model cascade to try alternatives
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
 
         const response = await fetch(url, {
           method: "POST",
@@ -305,6 +306,8 @@ function AICopilot() {
           },
           body: JSON.stringify({
             message: userMessage,
+            // Send prior messages so server can pass full context to LLM
+            history: conversationHistory,
           }),
           signal: controller.signal,
         });
@@ -333,6 +336,10 @@ function AICopilot() {
 
     if (!cleanMessage || isLoading) return;
 
+    // Snapshot current conversation BEFORE adding new user message
+    // This is what we send as history to give the LLM full context
+    const historySnapshot = [...messages];
+
     // Show user's message immediately
     setMessages((current) => [
       ...current,
@@ -346,7 +353,7 @@ function AICopilot() {
     setIsLoading(true);
 
     try {
-      const aiResponse = await getAIResponse(cleanMessage);
+      const aiResponse = await getAIResponse(cleanMessage, historySnapshot);
 
       setMessages((current) => [
         ...current,

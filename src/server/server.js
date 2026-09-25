@@ -13,425 +13,452 @@ dotenv.config({ path: path.resolve(__dirname, "./.env") });
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-// Target Model
-const targetModel = process.env.AI_MODEL || "qwen/qwen3.8-27b";
+// ─────────────────────────────────────────────
+//  PROVIDER DETECTION
+// ─────────────────────────────────────────────
 
-// 1. Check for OpenRouter API Key (Primary for qwen/qwen3.8-27b)
-const rawOpenRouterKey = process.env.OPENROUTER_API_KEY;
 const rawGroqKey = process.env.GROQ_API_KEY;
+const rawOpenRouterKey = process.env.OPENROUTER_API_KEY;
 const rawOpenAiKey = process.env.OPENAI_API_KEY;
 
-// Auto-detect OpenRouter key even if put into other env vars (starts with sk-or-)
-const openRouterKey =
-  (rawOpenRouterKey && !rawOpenRouterKey.includes("YOUR_") && rawOpenRouterKey.trim()) ||
-  (rawGroqKey && rawGroqKey.startsWith("sk-or-") && rawGroqKey.trim()) ||
-  (rawOpenAiKey && rawOpenAiKey.startsWith("sk-or-") && rawOpenAiKey.trim());
+// Detect valid Groq key (starts with gsk_)
+const groqApiKey =
+  rawGroqKey &&
+  rawGroqKey.startsWith("gsk_") &&
+  !rawGroqKey.includes("YOUR_")
+    ? rawGroqKey.trim()
+    : null;
+
+// Detect valid OpenRouter key (starts with sk-or-)
+const openRouterApiKey =
+  (rawOpenRouterKey &&
+    !rawOpenRouterKey.includes("YOUR_") &&
+    rawOpenRouterKey.trim()) ||
+  (rawGroqKey && rawGroqKey.startsWith("sk-or-")
+    ? rawGroqKey.trim()
+    : null) ||
+  (rawOpenAiKey && rawOpenAiKey.startsWith("sk-or-")
+    ? rawOpenAiKey.trim()
+    : null);
+
+// Detect valid OpenAI key
+const openAiApiKey =
+  rawOpenAiKey &&
+  rawOpenAiKey.startsWith("sk-") &&
+  !rawOpenAiKey.startsWith("sk-or-") &&
+  !rawOpenAiKey.includes("YOUR_")
+    ? rawOpenAiKey.trim()
+    : null;
+
+// Initialise clients
+let groq = null;
+if (groqApiKey) {
+  try {
+    const { default: Groq } = await import("groq-sdk");
+    groq = new Groq({ apiKey: groqApiKey });
+    console.log("✅ Groq client initialised");
+  } catch (err) {
+    console.warn("Groq SDK init failed:", err.message);
+  }
+}
 
 let openrouter = null;
-if (openRouterKey) {
+if (!groq && openRouterApiKey) {
   try {
     const { default: OpenAI } = await import("openai");
     openrouter = new OpenAI({
-      apiKey: openRouterKey,
+      apiKey: openRouterApiKey,
       baseURL: "https://openrouter.ai/api/v1",
-      defaultHeaders: {
-        "HTTP-Referer": "http://localhost:5173",
-        "X-Title": "HelpIQ",
-      },
+      defaultHeaders: { "HTTP-Referer": "http://localhost:5173", "X-Title": "HelpIQ" },
     });
+    console.log("✅ OpenRouter client initialised");
   } catch (err) {
-    console.warn("OpenRouter initialization failed:", err.message);
+    console.warn("OpenRouter init failed:", err.message);
   }
 }
-
-// 2. Check for Groq API Key
-const groqKey =
-  rawGroqKey &&
-  !rawGroqKey.includes("YOUR_") &&
-  !rawGroqKey.startsWith("sk-or-") &&
-  rawGroqKey.trim();
-
-let groq = null;
-if (groqKey) {
-  try {
-    const { default: Groq } = await import("groq-sdk");
-    groq = new Groq({ apiKey: groqKey });
-  } catch (err) {
-    console.warn("Groq SDK initialization failed:", err.message);
-  }
-}
-
-// 3. Check for OpenAI API Key
-const openAiKey =
-  rawOpenAiKey &&
-  !rawOpenAiKey.includes("YOUR_") &&
-  !rawOpenAiKey.startsWith("sk-or-") &&
-  rawOpenAiKey.trim();
 
 let openai = null;
-if (openAiKey) {
+if (!groq && !openrouter && openAiApiKey) {
   try {
     const { default: OpenAI } = await import("openai");
-    openai = new OpenAI({ apiKey: openAiKey });
+    openai = new OpenAI({ apiKey: openAiApiKey });
+    console.log("✅ OpenAI client initialised");
   } catch (err) {
-    console.warn("OpenAI package initialization failed:", err.message);
+    console.warn("OpenAI init failed:", err.message);
   }
 }
 
-// Intelligent IT Knowledge Base Responses for fallback / offline mode
-function generateITSupportResponse(userMessage) {
-  const query = userMessage.toLowerCase().trim();
+// ─────────────────────────────────────────────
+//  AGENTIC IT HELPDESK SYSTEM PROMPT
+// ─────────────────────────────────────────────
 
-  if (
-    query.includes("password") ||
-    query.includes("reset") ||
-    query.includes("login") ||
-    query.includes("account locked")
-  ) {
-    return `### 🔑 Password & Account Reset Guide
+const SYSTEM_PROMPT = `You are HelpIQ Copilot — an expert AI IT Helpdesk Agent for a corporate IT support team.
 
-Here is how you can resolve password and login issues:
+You operate as a multi-step intelligent agent with the following pipeline for every user issue:
 
-1. **Self-Service Reset**: Visit the corporate login portal and click **"Forgot Password"**.
-2. **Identity Verification**: Enter your registered email (\`ahamadreza09@gmail.com\`) and check your inbox or authenticator app for the 6-digit security code.
-3. **Password Requirements**:
-   - At least 12 characters long
-   - Include uppercase, lowercase, numbers, and special symbols
-   - Cannot match your previous 3 passwords
-4. **Account Locked?**: If you made more than 5 failed attempts, the account enters a 15-minute cooldown. If you need it unlocked immediately, click **"Create a ticket"** or contact the IT Helpdesk.`;
+1. UNDERSTAND: Identify the exact problem from the user message. Clarify ambiguities by asking one targeted follow-up question if needed.
+2. CLASSIFY: Categorise the issue (e.g. Authentication, Network, Hardware, Software, Email, Performance, Security, Printer, VPN).
+3. DIAGNOSE: Think step-by-step about what could be causing the problem. Consider system state, recent changes, error patterns, and environment (Windows/Mac/Linux, corporate vs personal network).
+4. SEARCH KNOWLEDGE BASE: Recall relevant IT documentation, best practices, known fixes, and Windows/Linux/macOS command references.
+5. TROUBLESHOOT: Provide a numbered, actionable resolution plan with specific commands, settings paths, and diagnostic steps.
+6. SAFE FIXES: If suggesting commands or registry/config changes, always warn about risks and recommend taking a backup first.
+7. VERIFY: End every response with 1–2 quick verification steps so the user can confirm the fix worked.
+8. ESCALATE: If the issue is beyond self-service scope (hardware failure, data loss risk, security breach), instruct the user to create an urgent support ticket.
+
+Response format rules:
+- Use markdown: ### for section headings, **bold** for key terms, \`code\` for commands/paths.
+- Number all steps clearly.
+- Be concise but thorough — no fluff.
+- Always end with a "✅ Verify it worked" section.
+- Speak conversationally. You are a helpful expert, not a formal document.
+
+You have access to knowledge about:
+- Windows 10/11 administration and troubleshooting
+- Active Directory, Azure AD, SSO, and MFA
+- Microsoft 365 (Outlook, Teams, SharePoint, OneDrive)
+- Network diagnostics (DNS, DHCP, VPN, TCP/IP)
+- Hardware diagnostics (printers, displays, peripherals)
+- Software deployment and permissions
+- Cybersecurity best practices
+- macOS and Linux basics for corporate environments`;
+
+// ─────────────────────────────────────────────
+//  GROQ MODEL PRIORITY ORDER  (most reliable first)
+// ─────────────────────────────────────────────
+
+const GROQ_MODELS = [
+  "llama-3.3-70b-versatile",  // Most reliable, huge context, very capable
+  "llama3-70b-8192",          // Stable fallback
+  "qwen-2.5-32b",             // Qwen on Groq — try after llama
+  "mixtral-8x7b-32768",       // Older but very stable
+  "llama3-8b-8192",           // Lightweight fast fallback
+];
+
+// ─────────────────────────────────────────────
+//  OFFLINE KNOWLEDGE BASE  (when no API keys)
+// ─────────────────────────────────────────────
+
+function offlineResponse(userMessage) {
+  const q = userMessage.toLowerCase();
+
+  if (q.includes("password") || q.includes("account locked") || q.includes("login") || q.includes("mfa") || q.includes("2fa")) {
+    return `### 🔑 Authentication Issue Detected
+
+**Step 1 — Self-Service Password Reset**
+1. Go to your company's SSO portal and click **"Forgot Password"**.
+2. Verify via your registered email or Microsoft Authenticator app.
+3. If MFA is failing: check your phone's time sync (Settings → General → Date & Time → Set Automatically).
+
+**Step 2 — Account Lockout**
+- Active Directory locks accounts after **5 failed attempts** (15-min cooldown).
+- If urgent, contact IT via the **Create Ticket** tab for immediate unlock.
+
+**Step 3 — Password Requirements**
+- Minimum 12 characters • Uppercase + lowercase + number + symbol
+- Cannot reuse last 3 passwords
+
+✅ **Verify it worked**: Log in at the SSO portal web page before trying the desktop app.`;
   }
 
-  if (
-    query.includes("wifi") ||
-    query.includes("wi-fi") ||
-    query.includes("network") ||
-    query.includes("internet") ||
-    query.includes("dns") ||
-    query.includes("offline")
-  ) {
-    return `### 🌐 Network & Wi-Fi Troubleshooting
+  if (q.includes("wifi") || q.includes("wi-fi") || q.includes("network") || q.includes("internet") || q.includes("no connection") || q.includes("dns") || q.includes("offline")) {
+    return `### 🌐 Network Connectivity Issue Detected
 
-Try these step-by-step diagnostic actions:
+**Step 1 — Quick Restart Sequence**
+1. Disconnect from Wi-Fi → wait 10 seconds → reconnect.
+2. If on VPN: disconnect VPN first, test internet, then reconnect VPN.
 
-1. **Quick Toggle**: Turn Wi-Fi off, wait 10 seconds, and turn it back on.
-2. **Forget & Reconnect**: In Windows Settings > *Network & Internet* > *Wi-Fi* > *Manage known networks*, remove the connection and reconnect with your domain credentials.
-3. **Flush DNS Cache**:
-   - Open Command Prompt or PowerShell as Administrator
-   - Run: \`ipconfig /flushdns\`
-   - Run: \`ipconfig /renew\`
-4. **Hardware Check**: Verify the router/access point lights. If on a company VPN, temporarily disconnect the VPN to check if local internet works.`;
+**Step 2 — Flush DNS & Renew IP** (Run as Administrator)
+\`\`\`
+ipconfig /flushdns
+ipconfig /release
+ipconfig /renew
+netsh winsock reset
+\`\`\`
+Restart your computer after running these.
+
+**Step 3 — Forget & Rejoin Network**
+- Settings → Network & Internet → Wi-Fi → Manage known networks → Remove → Reconnect with domain credentials.
+
+**Step 4 — DNS Server Override** (if still failing)
+- Network Adapter Settings → IPv4 → Use: \`8.8.8.8\` / \`8.8.4.4\`
+
+✅ **Verify it worked**: Run \`ping google.com\` in PowerShell. You should see replies with <100ms latency.`;
   }
 
-  if (
-    query.includes("ticket") ||
-    query.includes("create ticket") ||
-    query.includes("raise ticket") ||
-    query.includes("support ticket")
-  ) {
-    return `### 🎫 IT Support Ticket Creation
+  if (q.includes("slow") || q.includes("freeze") || q.includes("hang") || q.includes("crash") || q.includes("cpu") || q.includes("ram") || q.includes("performance") || q.includes("lag")) {
+    return `### ⚙️ System Performance Issue Detected
 
-I can help route this to the IT Support queue:
+**Step 1 — Immediate Triage**
+- Press \`Ctrl + Shift + Esc\` → Task Manager → **Processes** tab.
+- Sort by **CPU** then **Memory**. Identify the top consumer.
 
-- **Suggested Category**: System & Hardware Diagnostics
-- **Current Device**: Windows Laptop (User: Ahamad Reza)
-- **Priority**: Medium
+**Step 2 — Quick Fixes**
+\`\`\`powershell
+# Clear temp files
+Remove-Item -Path "$env:TEMP\\*" -Recurse -Force -ErrorAction SilentlyContinue
+# Disable startup bloat
+Get-CimInstance -Class Win32_StartupCommand | Select-Object Name, Command | Format-Table
+\`\`\`
 
-**Next Steps**:
-1. Head over to the **"Create Ticket"** tab in the User Portal.
-2. Provide a descriptive title, error screenshot, and urgency.
-3. Once submitted, our team usually responds within **15–30 minutes**.`;
+**Step 3 — Windows Disk Cleanup**
+- Press \`Win + R\` → type \`cleanmgr\` → select C: → check all boxes → OK.
+
+**Step 4 — Check for Windows Updates** draining resources in background
+- Settings → Windows Update → Pause updates if a large download is in progress.
+
+**Step 5 — Hardware Diagnostics**
+- RAM: \`mdsched.exe\` (Memory Diagnostic) — schedule for next reboot.
+- Disk: \`chkdsk C: /f\` — run after reboot.
+
+✅ **Verify it worked**: Reboot and re-check Task Manager. CPU should idle below 15%.`;
   }
 
-  if (
-    query.includes("diagnose") ||
-    query.includes("slow") ||
-    query.includes("freeze") ||
-    query.includes("crash") ||
-    query.includes("performance") ||
-    query.includes("cpu") ||
-    query.includes("ram")
-  ) {
-    return `### ⚙️ System Performance Diagnostics
+  if (q.includes("email") || q.includes("outlook") || q.includes("teams") || q.includes("onedrive") || q.includes("sharepoint") || q.includes("office") || q.includes("microsoft 365") || q.includes("m365")) {
+    return `### 📧 Microsoft 365 Issue Detected
 
-Let's identify what's slowing down your system:
+**Step 1 — Check Service Status**
+- Visit [status.office.com](https://status.office.com) to check if Microsoft is experiencing an outage.
 
-1. **Check Task Manager**: Press \`Ctrl + Shift + Esc\` and check the **Processes** tab. Look for apps consuming >80% CPU or Memory.
-2. **Clear Temp Files**: Press \`Win + R\`, type \`cleanmgr\`, select drive C: and perform a Disk Cleanup.
-3. **Pending Windows Updates**: Go to *Settings > Windows Update* to check if updates are downloading in the background.
-4. **Reboot**: A fresh system reboot clears hung processes and memory leaks.`;
+**Step 2 — Clear Outlook Cache**
+1. Close Outlook completely (check system tray).
+2. Press \`Win + R\` → \`%localappdata%\\Microsoft\\Outlook\`
+3. Delete \`.ost\` file (it will rebuild automatically on next launch). ⚠️ Do NOT delete \`.pst\` files.
+
+**Step 3 — Clear Teams Cache**
+1. Quit Teams from the system tray.
+2. Press \`Win + R\` → \`%appdata%\\Microsoft\\Teams\`
+3. Delete all contents of this folder.
+4. Relaunch Teams.
+
+**Step 4 — Re-authenticate**
+- File → Office Account → Sign Out → Sign In again with your corporate email.
+
+✅ **Verify it worked**: Send a test email to yourself and confirm it appears in Sent Items.`;
   }
 
-  if (query.includes("vpn") || query.includes("remote")) {
-    return `### 🛡️ VPN & Remote Access Troubleshooting
+  if (q.includes("vpn") || q.includes("remote access") || q.includes("remote desktop") || q.includes("rdp")) {
+    return `### 🛡️ VPN / Remote Access Issue Detected
 
-To resolve VPN connection errors:
+**Step 1 — Pre-flight Checklist**
+- ✅ Local internet working? (test \`ping 8.8.8.8\` in PowerShell)
+- ✅ MFA app approved? Check your Authenticator for pending push notifications.
+- ✅ VPN client up to date? Check your client version vs the IT-published version.
 
-1. Verify your main internet connection is stable before initiating VPN.
-2. Check your Multi-Factor Authentication (MFA) app for any pending push requests.
-3. Restart the VPN client software and ensure you are connected to the closest gateway server.
-4. If certificates have expired, contact IT to re-issue your client certificate.`;
+**Step 2 — Reconnect Sequence**
+1. Disconnect VPN completely.
+2. Flush DNS: \`ipconfig /flushdns\`
+3. Reconnect to VPN → approve MFA.
+
+**Step 3 — RDP-Specific Fixes**
+- Ensure port 3389 is not blocked: \`Test-NetConnection -ComputerName [IP] -Port 3389\`
+- Enable credential delegation in Group Policy if NLA errors appear.
+
+**Step 4 — Certificate Issues**
+If you see "Certificate expired" or "Untrusted certificate", contact IT — your client certificate needs renewal.
+
+✅ **Verify it worked**: Run \`ipconfig\` after connecting — you should see a company-range VPN IP address.`;
   }
 
-  if (query.includes("printer") || query.includes("print")) {
-    return `### 🖨️ Printer & Peripheral Troubleshooting
+  if (q.includes("printer") || q.includes("print") || q.includes("scanner") || q.includes("toner")) {
+    return `### 🖨️ Printer / Scanner Issue Detected
 
-1. Ensure the printer is powered on and connected to the same office Wi-Fi or Ethernet network.
-2. Go to **Settings > Devices > Printers & Scanners**, select your printer, and click **"Open queue"** to cancel any stuck print jobs.
-3. Restart the **Print Spooler** service via \`services.msc\` or restart your PC.`;
+**Step 1 — Clear Print Queue**
+1. Press \`Win + R\` → type \`services.msc\`
+2. Find **Print Spooler** → right-click → **Stop**.
+3. Navigate to \`C:\\Windows\\System32\\spool\\PRINTERS\` → delete all files inside.
+4. Back in Services → right-click Print Spooler → **Start**.
+
+**Step 2 — Remove & Re-add Printer**
+- Settings → Devices → Printers & Scanners → Remove → Add a printer → search by IP or name.
+
+**Step 3 — Driver Reinstall**
+\`\`\`powershell
+# Remove existing driver
+pnputil /delete-driver [oem##.inf] /uninstall /force
+\`\`\`
+Then download the latest driver from the manufacturer's website.
+
+✅ **Verify it worked**: Print a Windows Test Page (right-click printer → Printer Properties → Print Test Page).`;
   }
 
-  if (
-    query.includes("email") ||
-    query.includes("outlook") ||
-    query.includes("mail") ||
-    query.includes("teams")
-  ) {
-    return `### 📧 Email & Microsoft Teams Troubleshooting
+  if (q.includes("install") || q.includes("software") || q.includes("application") || q.includes("permission") || q.includes("admin right") || q.includes("access denied")) {
+    return `### 📦 Software / Access Permission Issue Detected
 
-1. **Verify Credentials**: Sign in to the web version (*outlook.office.com*) to check if your account is active.
-2. **Clear Outlook Cache**:
-   - Close Outlook.
-   - Press \`Win + R\`, type \`%localappdata%\\Microsoft\\Outlook\`, and clear temp cache files.
-3. **Teams Cache Reset**: Quit Teams from the system tray, then delete contents in \`%appdata%\\Microsoft\\Teams\`.
-4. **Re-sync Account**: In Windows Settings > *Accounts* > *Access work or school*, disconnect and reconnect your corporate account.`;
+**Step 1 — Check Company Software Portal**
+- Open **Company Portal** (or Software Center for SCCM environments).
+- Search for the application — it may be available for self-service install without admin rights.
+
+**Step 2 — Request Admin Elevation**
+If you need local admin for installation:
+1. Submit a ticket via the User Portal with: software name, version, business justification.
+2. IT will either deploy it centrally or grant temporary elevation.
+
+**Step 3 — Access Denied to Files/Folders**
+- Right-click → Properties → Security → check your username/group has Read or Modify.
+- If denied on a network share, your AD group may need updating — contact your IT admin.
+
+**Step 4 — UAC Override (safe)**
+- Right-click installer → "Run as administrator" with IT-provided credentials.
+
+✅ **Verify it worked**: Launch the application and confirm it opens without errors.`;
   }
 
-  if (
-    query.includes("audio") ||
-    query.includes("mic") ||
-    query.includes("speaker") ||
-    query.includes("sound") ||
-    query.includes("camera")
-  ) {
-    return `### 🎧 Audio & Camera Diagnostics
+  if (/^(hi|hello|hey|greetings|good morning|good afternoon|good evening)(\s+there|\s+copilot|\s+helpiq|\s+agent)?$/i.test(q.trim())) {
+    return `Hello! 👋 I'm **HelpIQ Copilot** — your AI IT Helpdesk Agent.
 
-1. **Device Permissions**: Go to Windows Settings > *Privacy & Security* > *Microphone / Camera* and ensure app access is allowed.
-2. **Default Output**: Right-click the speaker icon in taskbar > *Sound settings* and confirm the correct output device is set as Default.
-3. **Driver Check**: Open Device Manager (\`devmgmt.msc\`), expand *Audio inputs and outputs*, right-click your device, and select **Update driver**.`;
+I work like a real IT engineer:
+1. 🔍 **Understand** your issue
+2. 🧠 **Diagnose** the root cause
+3. 🛠️ **Provide step-by-step fixes** with commands
+4. ✅ **Verify** the resolution
+
+What's your IT issue today? Describe it in as much detail as you can — the error message, what you were doing when it happened, and your operating system.`;
   }
 
-  if (
-    query.includes("software") ||
-    query.includes("install") ||
-    query.includes("admin") ||
-    query.includes("permission")
-  ) {
-    return `### 📦 Software & Installation Assistance
+  return `### 💡 HelpIQ IT Agent Analysis
 
-1. **Company Portal**: Check if the requested application is available in the **Company Portal** or self-service IT catalog.
-2. **Admin Privileges**: If you see an *"Administrator credentials required"* prompt, submit a ticket requesting software deployment or elevated access.
-3. **Compatibility**: Verify minimum system requirements and ensure your OS has the latest patches applied.`;
-  }
+**Issue received:** "${userMessage}"
 
-  // Only trigger greeting if message is primarily a greeting, not a full question
-  if (
-    /^(hi|hello|hey|help|greetings|good morning|good afternoon|good evening)(\s+there|\s+copilot|\s+helpiq)?$/i.test(
-      query
-    )
-  ) {
-    return `Hello! 👋 I'm **HelpIQ Copilot**, powered by **${targetModel}**.
+**Diagnostic Steps:**
+1. **Reproduce the issue** — note the exact error message and when it occurs.
+2. **Check Event Viewer** — \`Win + R\` → \`eventvwr\` → Windows Logs → Application/System — look for red errors near the time of the issue.
+3. **Recent changes** — did this start after a Windows Update, new software install, or network change?
+4. **Restart** the affected service or application first.
 
-How can I help you today? You can ask me to:
-- 🔑 **Reset passwords** or unlock accounts
-- 🌐 Troubleshoot **Wi-Fi & network** connection drops
-- ⚙️ **Diagnose slow performance** or system crashes
-- 📧 Fix **Outlook, Email, or Teams** issues
-- 🎧 Troubleshoot **Audio, Mic, or Camera**
-- 🎫 Guide you through **creating a support ticket**`;
-  }
+If these steps don't resolve it, submit a support ticket via the **User Portal** with:
+- Screenshot of the error
+- Affected device name (run \`hostname\` in cmd)
+- Time the issue started
 
-  return `### 💡 HelpIQ IT Assistant Analysis
-
-I have received your request regarding: **"${userMessage}"**.
-
-**Recommended Actions:**
-1. Check if the issue is reproducible after restarting the affected application or system.
-2. Review recent updates or configuration changes on your device.
-3. If this is preventing critical work, please submit a ticket with details or error logs via the **User Portal** so our support engineers can assist directly.`;
+✅ **Verify**: After trying the steps above, test the original workflow that was failing.`;
 }
 
-// Health check endpoint
-app.get("/api/health", (req, res) => {
-  const currentProvider = openrouter
-    ? `OpenRouter (${targetModel})`
-    : groq
-    ? "Groq (llama-3.3-70b-versatile)"
+// ─────────────────────────────────────────────
+//  ROUTES
+// ─────────────────────────────────────────────
+
+app.get("/api/health", (_req, res) => {
+  const provider = groq
+    ? `Groq (${GROQ_MODELS[0]})`
+    : openrouter
+    ? "OpenRouter"
     : openai
-    ? "OpenAI (gpt-4o-mini)"
-    : "intelligent-knowledge-base";
+    ? "OpenAI"
+    : "Offline Knowledge Base";
 
-  res.json({
-    status: "ok",
-    aiProvider: currentProvider,
-    model: targetModel,
-  });
+  res.json({ status: "ok", aiProvider: provider });
 });
 
-// Chat endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, history = [] } = req.body;
 
     if (!message || !message.trim()) {
-      return res.status(400).json({
-        error: "Message is required",
-      });
+      return res.status(400).json({ error: "Message is required" });
     }
 
     const cleanMessage = message.trim();
-    const systemPrompt = `You are HelpIQ Copilot, an expert IT support assistant powered by ${targetModel}. Provide concise, clear, and actionable step-by-step troubleshooting steps for corporate and personal IT issues. Use markdown formatting when helpful.`;
 
-    // 1. Try OpenRouter (Model: qwen/qwen3.8-27b or custom)
-    if (openrouter) {
-      try {
-        const completion = await openrouter.chat.completions.create({
-          model: targetModel,
-          messages: [
-            {
-              role: "system",
-              content: systemPrompt,
-            },
-            {
-              role: "user",
-              content: cleanMessage,
-            },
-          ],
-          temperature: 0.6,
-          max_tokens: 800,
-        });
+    // Build conversation messages with full history for context
+    const conversationMessages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      // Include prior conversation turns (up to last 10 exchanges)
+      ...history.slice(-20).map((m) => ({
+        role: m.type === "user" ? "user" : "assistant",
+        content: m.text,
+      })),
+      { role: "user", content: cleanMessage },
+    ];
 
-        const reply = completion.choices[0]?.message?.content;
-        if (reply) {
-          return res.json({
-            answer: reply,
-            provider: `OpenRouter (${targetModel})`,
-          });
-        }
-      } catch (openRouterError) {
-        console.warn("OpenRouter API call failed, attempting fallback:", openRouterError.message);
-        // If exact model failed, try free tier alias or next provider
-        if (targetModel.includes("qwen") && !targetModel.includes(":free")) {
-          try {
-            const freeCompletion = await openrouter.chat.completions.create({
-              model: `${targetModel}:free`,
-              messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: cleanMessage },
-              ],
-              temperature: 0.6,
-              max_tokens: 800,
-            });
-            const freeReply = freeCompletion.choices[0]?.message?.content;
-            if (freeReply) {
-              return res.json({
-                answer: freeReply,
-                provider: `OpenRouter (${targetModel}:free)`,
-              });
-            }
-          } catch {
-            // Ignore and proceed to secondary
-          }
-        }
-      }
-    }
-
-    // 2. Try Groq (if configured and OpenRouter not used)
+    // ── 1. Try Groq with model fallback cascade ──────────────────
     if (groq) {
-      try {
-        // Groq uses qwen-2.5-32b or llama-3.3-70b-versatile
-        const groqModel = targetModel.toLowerCase().includes("qwen")
-          ? "qwen-2.5-32b"
-          : "llama-3.3-70b-versatile";
-
-        const completion = await groq.chat.completions.create({
-          model: groqModel,
-          messages: [
-            {
-              role: "system",
-              content: systemPrompt,
-            },
-            {
-              role: "user",
-              content: cleanMessage,
-            },
-          ],
-          temperature: 0.6,
-          max_tokens: 800,
-        });
-
-        const reply = completion.choices[0]?.message?.content;
-        if (reply) {
-          return res.json({
-            answer: reply,
-            provider: `Groq (${groqModel})`,
+      for (const model of GROQ_MODELS) {
+        try {
+          const completion = await groq.chat.completions.create({
+            model,
+            messages: conversationMessages,
+            temperature: 0.5,
+            max_tokens: 1024,
           });
+
+          const reply = completion.choices[0]?.message?.content;
+          if (reply && reply.trim()) {
+            console.log(`✅ Groq responded with model: ${model}`);
+            return res.json({ answer: reply.trim(), provider: `Groq (${model})` });
+          }
+        } catch (err) {
+          console.warn(`⚠️  Groq model ${model} failed: ${err.message} — trying next model...`);
+          // Short pause before retrying next model
+          await new Promise((r) => setTimeout(r, 300));
         }
-      } catch (groqError) {
-        console.warn("Groq API call failed, attempting fallback:", groqError.message);
       }
     }
 
-    // 3. Try OpenAI (if configured)
+    // ── 2. Try OpenRouter ─────────────────────────────────────────
+    if (openrouter) {
+      const orModel = process.env.AI_MODEL || "qwen/qwen3.8-27b";
+      for (const modelId of [orModel, `${orModel}:free`, "meta-llama/llama-3.3-70b-instruct"]) {
+        try {
+          const completion = await openrouter.chat.completions.create({
+            model: modelId,
+            messages: conversationMessages,
+            temperature: 0.5,
+            max_tokens: 1024,
+          });
+          const reply = completion.choices[0]?.message?.content;
+          if (reply && reply.trim()) {
+            console.log(`✅ OpenRouter responded with model: ${modelId}`);
+            return res.json({ answer: reply.trim(), provider: `OpenRouter (${modelId})` });
+          }
+        } catch (err) {
+          console.warn(`⚠️  OpenRouter model ${modelId} failed: ${err.message}`);
+        }
+      }
+    }
+
+    // ── 3. Try OpenAI ─────────────────────────────────────────────
     if (openai) {
       try {
         const completion = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content: systemPrompt,
-            },
-            {
-              role: "user",
-              content: cleanMessage,
-            },
-          ],
-          temperature: 0.7,
-          max_tokens: 600,
+          messages: conversationMessages,
+          temperature: 0.5,
+          max_tokens: 1024,
         });
-
         const reply = completion.choices[0]?.message?.content;
-        if (reply) {
-          return res.json({
-            answer: reply,
-            provider: "OpenAI (gpt-4o-mini)",
-          });
+        if (reply && reply.trim()) {
+          return res.json({ answer: reply.trim(), provider: "OpenAI (gpt-4o-mini)" });
         }
-      } catch (openAiError) {
-        console.warn("OpenAI API call failed, falling back to IT knowledge base:", openAiError.message);
+      } catch (err) {
+        console.warn("OpenAI failed:", err.message);
       }
     }
 
-    // 4. Built-in IT Knowledge Base fallback
-    const localAnswer = generateITSupportResponse(cleanMessage);
+    // ── 4. Offline Knowledge Base ─────────────────────────────────
     return res.json({
-      answer: localAnswer,
+      answer: offlineResponse(cleanMessage),
       provider: "intelligent-knowledge-base",
     });
+
   } catch (error) {
     console.error("SERVER ERROR:", error);
-    res.status(500).json({
-      error: "Server response failed",
-    });
+    res.status(500).json({ error: "Server response failed" });
   }
 });
 
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, () => {
-  const providerLabel = openrouter
-    ? `OpenRouter (${targetModel})`
-    : groq
-    ? "Groq (Qwen/Llama)"
+  const provider = groq
+    ? `Groq → models: ${GROQ_MODELS.slice(0, 3).join(", ")}`
+    : openrouter
+    ? "OpenRouter"
     : openai
-    ? "OpenAI (gpt-4o-mini)"
-    : "Intelligent IT Knowledge Base (add API key to activate live LLM)";
+    ? "OpenAI"
+    : "⚠️  No API key found — using Offline Knowledge Base";
 
-  console.log(`HelpIQ AI server running on http://localhost:${PORT}`);
-  console.log(`Configured Model: ${targetModel}`);
-  console.log(`AI Provider mode: ${providerLabel}`);
+  console.log(`\nHelpIQ AI server → http://localhost:${PORT}`);
+  console.log(`Provider: ${provider}\n`);
 });
